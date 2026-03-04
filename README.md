@@ -2,6 +2,8 @@
 
 Minimal Pomodoro timer for Linux that runs in the background and exposes a Waybar indicator.
 
+> Note: this project is currently tested only on Omarchy.
+
 ## Features
 
 - Pure CLI workflow (`start`, `pause`, `resume`, `skip`, `stop`, `status`)
