@@ -2,6 +2,8 @@
 
 Minimal Pomodoro timer for Linux that runs in the background and exposes a Waybar indicator.
 
+![pomo](pomo.png)
+
 > Note: this project is currently tested only on Omarchy.
 
 ## Features
