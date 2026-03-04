@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}"
+STATE_DIR="$STATE_ROOT/pomodoro"
+STATE_FILE="$STATE_DIR/state"
+PID_FILE="$STATE_DIR/pid"
+LOG_FILE="$STATE_DIR/log"
+WAYBAR_SIGNAL="11"
+
+mkdir -p "$STATE_DIR"
+
+save_state() {
+  cat >"$STATE_FILE" <<EOF
+running=$running
+paused=$paused
+phase=$phase
+cycle=$cycle
+work_s=$work_s
+break_s=$break_s
+long_break_s=$long_break_s
+long_every=$long_every
+ends_at=$ends_at
+remaining=$remaining
+EOF
+}
+
+load_state() {
+  running=0
+  paused=0
+  phase="stopped"
+  cycle=0
+  work_s=$((25 * 60))
+  break_s=$((5 * 60))
+  long_break_s=$((15 * 60))
+  long_every=4
+  ends_at=0
+  remaining=0
+
+  if [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE"
+  fi
+}
+
+signal_waybar() {
+  pkill -RTMIN+"$WAYBAR_SIGNAL" waybar 2>/dev/null || true
+}
+
+notify() {
+  local title="$1"
+  local body="$2"
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "$title" "$body"
+  fi
+}
+
+fmt_mmss() {
+  local seconds="$1"
+  if (( seconds < 0 )); then
+    seconds=0
+  fi
+  printf "%02d:%02d" $((seconds / 60)) $((seconds % 60))
+}
+
+duration_for_phase() {
+  case "$1" in
+    work) echo "$work_s" ;;
+    break) echo "$break_s" ;;
+    long_break) echo "$long_break_s" ;;
+    *) echo 0 ;;
+  esac
+}
+
+next_phase() {
+  if [[ "$phase" == "work" ]]; then
+    cycle=$((cycle + 1))
+    if (( cycle % long_every == 0 )); then
+      phase="long_break"
+      notify "Pomodoro" "Work session done. Long break started."
+    else
+      phase="break"
+      notify "Pomodoro" "Work session done. Break started."
+    fi
+  else
+    phase="work"
+    notify "Pomodoro" "Break done. Focus session started."
+  fi
+
+  remaining="$(duration_for_phase "$phase")"
+  ends_at=$(( $(date +%s) + remaining ))
+}
+
+is_daemon_alive() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE")"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+cmd_daemon() {
+  local work_min="${1:-25}"
+  local break_min="${2:-5}"
+  local long_break_min="${3:-15}"
+  local every="${4:-4}"
+
+  load_state
+  running=1
+  paused=0
+  phase="work"
+  cycle=0
+  work_s=$((work_min * 60))
+  break_s=$((break_min * 60))
+  long_break_s=$((long_break_min * 60))
+  long_every="$every"
+  remaining="$work_s"
+  ends_at=$(( $(date +%s) + remaining ))
+  save_state
+  signal_waybar
+  notify "Pomodoro" "Focus session started."
+
+  while true; do
+    if ! is_daemon_alive; then
+      exit 0
+    fi
+
+    load_state
+    if [[ "$running" != "1" ]]; then
+      rm -f "$PID_FILE"
+      signal_waybar
+      exit 0
+    fi
+
+    if [[ "$paused" == "1" ]]; then
+      sleep 1
+      continue
+    fi
+
+    now="$(date +%s)"
+    if (( now >= ends_at )); then
+      next_phase
+      save_state
+      signal_waybar
+      continue
+    fi
+
+    remaining=$((ends_at - now))
+    save_state
+    sleep 1
+  done
+}
+
+cmd_start() {
+  local work_min=25
+  local break_min=5
+  local long_break_min=15
+  local every=4
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --work)
+        work_min="$2"
+        shift 2
+        ;;
+      --break)
+        break_min="$2"
+        shift 2
+        ;;
+      --long-break)
+        long_break_min="$2"
+        shift 2
+        ;;
+      --long-every)
+        every="$2"
+        shift 2
+        ;;
+      *)
+        echo "Unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if is_daemon_alive; then
+    echo "Pomodoro is already running."
+    exit 0
+  fi
+
+  nohup "$0" daemon "$work_min" "$break_min" "$long_break_min" "$every" >>"$LOG_FILE" 2>&1 &
+  echo "$!" >"$PID_FILE"
+  disown || true
+  echo "Pomodoro started in background."
+}
+
+cmd_stop() {
+  load_state
+  running=0
+  paused=0
+  phase="stopped"
+  ends_at=0
+  remaining=0
+  save_state
+
+  if is_daemon_alive; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  signal_waybar
+  notify "Pomodoro" "Timer stopped."
+  echo "Pomodoro stopped."
+}
+
+cmd_pause() {
+  load_state
+  if [[ "$running" != "1" ]]; then
+    echo "Pomodoro is not running."
+    exit 1
+  fi
+  if [[ "$paused" == "1" ]]; then
+    echo "Pomodoro is already paused."
+    exit 0
+  fi
+
+  local now
+  now="$(date +%s)"
+  remaining=$((ends_at - now))
+  if (( remaining < 0 )); then
+    remaining=0
+  fi
+  paused=1
+  ends_at=0
+  save_state
+  signal_waybar
+  echo "Pomodoro paused."
+}
+
+cmd_resume() {
+  load_state
+  if [[ "$running" != "1" ]]; then
+    echo "Pomodoro is not running."
+    exit 1
+  fi
+  if [[ "$paused" != "1" ]]; then
+    echo "Pomodoro is not paused."
+    exit 0
+  fi
+
+  paused=0
+  ends_at=$(( $(date +%s) + remaining ))
+  save_state
+  signal_waybar
+  echo "Pomodoro resumed."
+}
+
+cmd_toggle() {
+  load_state
+  if [[ "$running" != "1" ]]; then
+    cmd_start
+    return
+  fi
+  if [[ "$paused" == "1" ]]; then
+    cmd_resume
+  else
+    cmd_pause
+  fi
+}
+
+cmd_skip() {
+  load_state
+  if [[ "$running" != "1" ]]; then
+    echo "Pomodoro is not running."
+    exit 1
+  fi
+  next_phase
+  save_state
+  signal_waybar
+  echo "Skipped to $phase."
+}
+
+cmd_status() {
+  load_state
+  if [[ "$running" != "1" ]]; then
+    echo "Stopped"
+    return
+  fi
+
+  local left
+  if [[ "$paused" == "1" ]]; then
+    left="$remaining"
+    echo "Paused ($phase) $(fmt_mmss "$left")"
+  else
+    left=$((ends_at - $(date +%s)))
+    echo "Running ($phase) $(fmt_mmss "$left")"
+  fi
+}
+
+cmd_waybar() {
+  load_state
+  local text tooltip class left
+
+  if [[ "$running" != "1" ]]; then
+    text="POMO off"
+    tooltip="Pomodoro stopped\nLeft click: start"
+    class="inactive"
+  elif [[ "$paused" == "1" ]]; then
+    left="$remaining"
+    text="POMO $(fmt_mmss "$left")"
+    tooltip="Paused: $phase\nLeft click: resume\nMiddle click: skip\nRight click: stop"
+    class="paused"
+  else
+    left=$((ends_at - $(date +%s)))
+    text="POMO $(fmt_mmss "$left")"
+    tooltip="Running: $phase\nMiddle click: skip\nLeft click: pause\nRight click: stop"
+    class="active"
+  fi
+
+  printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$text" "$tooltip" "$class"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: pomodoro <command> [options]
+
+Commands:
+  start [--work MIN] [--break MIN] [--long-break MIN] [--long-every N]
+  stop
+  pause
+  resume
+  toggle
+  skip
+  status
+  waybar
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+
+  case "$cmd" in
+    daemon) cmd_daemon "$@" ;;
+    start) cmd_start "$@" ;;
+    stop) cmd_stop ;;
+    pause) cmd_pause ;;
+    resume) cmd_resume ;;
+    toggle) cmd_toggle ;;
+    skip) cmd_skip ;;
+    status) cmd_status ;;
+    waybar) cmd_waybar ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
