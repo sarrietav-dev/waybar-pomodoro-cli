@@ -10,6 +10,7 @@ Minimal Pomodoro timer for Linux that runs in the background and exposes a Wayba
 - Background daemon mode with persistent state
 - Waybar JSON output (`pomodoro waybar`) with live updates via signal
 - Optional desktop notifications with `notify-send`
+- Configurable sound notifications (default: on)
 
 ## Install
 
@@ -33,6 +34,9 @@ Start with custom durations:
 
 ```bash
 pomodoro start --work 50 --break 10 --long-break 20 --long-every 3
+
+# Start silently
+pomodoro start --no-sound
 ```
 
 Other commands:
@@ -44,6 +48,12 @@ pomodoro resume
 pomodoro skip
 pomodoro stop
 pomodoro toggle
+
+# Configure sound notifications
+pomodoro sound status
+pomodoro sound off
+pomodoro sound on
+pomodoro sound toggle
 ```
 
 ## Waybar Integration

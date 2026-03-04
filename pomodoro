@@ -21,6 +21,7 @@ work_s=$work_s
 break_s=$break_s
 long_break_s=$long_break_s
 long_every=$long_every
+sound_enabled=$sound_enabled
 ends_at=$ends_at
 remaining=$remaining
 EOF
@@ -35,6 +36,7 @@ load_state() {
   break_s=$((5 * 60))
   long_break_s=$((15 * 60))
   long_every=4
+  sound_enabled=1
   ends_at=0
   remaining=0
 
@@ -54,6 +56,31 @@ notify() {
   if command -v notify-send >/dev/null 2>&1; then
     notify-send "$title" "$body"
   fi
+}
+
+play_sound() {
+  if [[ "$sound_enabled" != "1" ]]; then
+    return
+  fi
+
+  if command -v canberra-gtk-play >/dev/null 2>&1; then
+    canberra-gtk-play -i bell -d "pomodoro" >/dev/null 2>&1 || true
+    return
+  fi
+
+  if command -v paplay >/dev/null 2>&1; then
+    local sound_file="/usr/share/sounds/freedesktop/stereo/complete.oga"
+    if [[ -f "$sound_file" ]]; then
+      paplay "$sound_file" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+notify_event() {
+  local title="$1"
+  local body="$2"
+  notify "$title" "$body"
+  play_sound
 }
 
 fmt_mmss() {
@@ -78,14 +105,14 @@ next_phase() {
     cycle=$((cycle + 1))
     if (( cycle % long_every == 0 )); then
       phase="long_break"
-      notify "Pomodoro" "Work session done. Long break started."
+      notify_event "Pomodoro" "Work session done. Long break started."
     else
       phase="break"
-      notify "Pomodoro" "Work session done. Break started."
+      notify_event "Pomodoro" "Work session done. Break started."
     fi
   else
     phase="work"
-    notify "Pomodoro" "Break done. Focus session started."
+    notify_event "Pomodoro" "Break done. Focus session started."
   fi
 
   remaining="$(duration_for_phase "$phase")"
@@ -159,6 +186,7 @@ cmd_start() {
   local break_min=5
   local long_break_min=15
   local every=4
+  local sound=1
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -178,6 +206,14 @@ cmd_start() {
         every="$2"
         shift 2
         ;;
+      --sound)
+        sound=1
+        shift
+        ;;
+      --no-sound)
+        sound=0
+        shift
+        ;;
       *)
         echo "Unknown option: $1" >&2
         exit 1
@@ -189,6 +225,10 @@ cmd_start() {
     echo "Pomodoro is already running."
     exit 0
   fi
+
+  load_state
+  sound_enabled="$sound"
+  save_state
 
   nohup "$0" daemon "$work_min" "$break_min" "$long_break_min" "$every" >>"$LOG_FILE" 2>&1 &
   echo "$!" >"$PID_FILE"
@@ -210,8 +250,50 @@ cmd_stop() {
   fi
   rm -f "$PID_FILE"
   signal_waybar
-  notify "Pomodoro" "Timer stopped."
+  notify_event "Pomodoro" "Timer stopped."
   echo "Pomodoro stopped."
+}
+
+cmd_sound() {
+  load_state
+  local mode="${1:-status}"
+
+  case "$mode" in
+    on)
+      sound_enabled=1
+      save_state
+      signal_waybar
+      echo "Sound notifications enabled."
+      ;;
+    off)
+      sound_enabled=0
+      save_state
+      signal_waybar
+      echo "Sound notifications disabled."
+      ;;
+    toggle)
+      if [[ "$sound_enabled" == "1" ]]; then
+        sound_enabled=0
+        echo "Sound notifications disabled."
+      else
+        sound_enabled=1
+        echo "Sound notifications enabled."
+      fi
+      save_state
+      signal_waybar
+      ;;
+    status)
+      if [[ "$sound_enabled" == "1" ]]; then
+        echo "Sound notifications: on"
+      else
+        echo "Sound notifications: off"
+      fi
+      ;;
+    *)
+      echo "Usage: pomodoro sound [on|off|toggle|status]" >&2
+      exit 1
+      ;;
+  esac
 }
 
 cmd_pause() {
@@ -304,17 +386,17 @@ cmd_waybar() {
 
   if [[ "$running" != "1" ]]; then
     text="POMO off"
-    tooltip="Pomodoro stopped\nLeft click: start"
+    tooltip="Pomodoro stopped\nSound: $( [[ "$sound_enabled" == "1" ]] && echo on || echo off )\nLeft click: start"
     class="inactive"
   elif [[ "$paused" == "1" ]]; then
     left="$remaining"
     text="POMO $(fmt_mmss "$left")"
-    tooltip="Paused: $phase\nLeft click: resume\nMiddle click: skip\nRight click: stop"
+    tooltip="Paused: $phase\nSound: $( [[ "$sound_enabled" == "1" ]] && echo on || echo off )\nLeft click: resume\nMiddle click: skip\nRight click: stop"
     class="paused"
   else
     left=$((ends_at - $(date +%s)))
     text="POMO $(fmt_mmss "$left")"
-    tooltip="Running: $phase\nMiddle click: skip\nLeft click: pause\nRight click: stop"
+    tooltip="Running: $phase\nSound: $( [[ "$sound_enabled" == "1" ]] && echo on || echo off )\nMiddle click: skip\nLeft click: pause\nRight click: stop"
     class="active"
   fi
 
@@ -326,12 +408,13 @@ usage() {
 Usage: pomodoro <command> [options]
 
 Commands:
-  start [--work MIN] [--break MIN] [--long-break MIN] [--long-every N]
+  start [--work MIN] [--break MIN] [--long-break MIN] [--long-every N] [--sound|--no-sound]
   stop
   pause
   resume
   toggle
   skip
+  sound [on|off|toggle|status]
   status
   waybar
 EOF
@@ -349,6 +432,7 @@ main() {
     resume) cmd_resume ;;
     toggle) cmd_toggle ;;
     skip) cmd_skip ;;
+    sound) cmd_sound "$@" ;;
     status) cmd_status ;;
     waybar) cmd_waybar ;;
     *)
